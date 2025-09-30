@@ -14,16 +14,34 @@ class GenerateArguments(TaskArguments):
                 name="os",
                 cli_name="os",
                 display_name="os",
-                description="operating system",
+                description="Operating System",
                 default_value='windows',
                 type=ParameterType.ChooseOne,
                 choices=["linux", "windows"]
             ),
             CommandParameter(
-                name="mtls",
-                cli_name="mtls",
-                display_name="mtls",
-                description="mtls ip:port to use",
+                name="mode",
+                cli_name="mode",
+                display_name="Implant Type",
+                description="Session (interactive) or Beacon (periodic)",
+                default_value='session',
+                type=ParameterType.ChooseOne,
+                choices=["session", "beacon"]
+            ),
+            CommandParameter(
+                name="protocol",
+                cli_name="protocol",
+                display_name="Protocol",
+                description="Single protocol for C2 (mtls, http, https)",
+                default_value="mtls",
+                type=ParameterType.ChooseOne,
+                choices=["mtls", "http", "https"],
+            ),
+            CommandParameter(
+                name="host",
+                cli_name="host",
+                display_name="Host:Port",
+                description="C2 endpoint (e.g., 1.2.3.4:443 or mtls.example.com:443)",
                 type=ParameterType.String,
             ),
         ]
@@ -93,8 +111,10 @@ class Generate(CommandBase):
         # TODO:  info    Get information about the server's compiler
         # TODO:  stager  Generate a stager using Metasploit (requires local Metasploit installation)
 
-        os = taskData.args.get_arg('os')
-        mtls = taskData.args.get_arg('mtls')
+        os = taskData.args.get_arg("os")
+        mode = taskData.args.get_arg("mode")
+        protocol = taskData.args.get_arg("protocol")
+        host = taskData.args.get_arg("host")
         sliverconfig_file_uuid = taskData.BuildParameters[0].Value
 
         sliver_os_table = {
@@ -104,43 +124,74 @@ class Generate(CommandBase):
 
         # TODO: include 'shell' for sessions, but not for beaconers
 
+        original_task_id = taskData.Task.ID
+
+        build_params = [
+            MythicRPCPayloadConfigurationBuildParameter(name="os", value=os),
+            MythicRPCPayloadConfigurationBuildParameter(name="mode", value=mode),
+            MythicRPCPayloadConfigurationBuildParameter(name="protocol", value=protocol),
+            MythicRPCPayloadConfigurationBuildParameter(name="host", value=host),
+            MythicRPCPayloadConfigurationBuildParameter(name="sliverconfig_file_uuid", value=sliverconfig_file_uuid),
+            MythicRPCPayloadConfigurationBuildParameter(name="task_id", value=original_task_id),
+        ]
+
+
         createMessage = MythicRPCPayloadCreateFromScratchMessage(
             TaskID=taskData.Task.ID,
             PayloadConfiguration=MythicRPCPayloadConfiguration(
                 PayloadType="sliverimplant",
                 SelectedOS=sliver_os_table[os],                 
                 Description="generated payload: sliver implant",
-                BuildParameters=[
-                    MythicRPCPayloadConfigurationBuildParameter(
-                        name='sliverconfig_file_uuid',
-                        value=sliverconfig_file_uuid
-                    ),
-                    MythicRPCPayloadConfigurationBuildParameter(
-                        name='os',
-                        value=os
-                    ),
-                    MythicRPCPayloadConfigurationBuildParameter(
-                        name='mtls',
-                        value=f"mtls://{mtls}"
-                    ),
-                ],
+                BuildParameters=build_params,
                 C2Profiles=[],
                 Commands=['ifconfig', 'download', 'upload', 'ls', 'ps', 'ping', 'whoami', 'screenshot', 'netstat', 'getgid', 'getuid', 'getpid', 'cat', 'cd', 'pwd', 'info', 'execute', 'mkdir', 'shell', 'terminate', 'rm']
             ),
         )
-        await SendMythicRPCPayloadCreateFromScratch(createMessage)
-        
-        await SendMythicRPCResponseCreate(MythicRPCResponseCreateMessage(
-            TaskID=taskData.Task.ID,
-            Response="generated implant".encode("UTF8"),
-        ))
 
-        taskResponse = MythicCommandBase.PTTaskCreateTaskingMessageResponse(
-            TaskID=taskData.Task.ID,
-            Success=True,
-            Completed=True
-        )
-        return taskResponse
+        # SEND the payload create request AND WAIT for the builder to finish / report back
+        try:
+            resp = await SendMythicRPCPayloadCreateFromScratch(createMessage)
+            if not resp.Success:
+                raise Exception(resp.Error)
+
+            await SendMythicRPCResponseCreate(MythicRPCResponseCreateMessage(
+                TaskID=taskData.Task.ID,
+                Response=f"[*] Build request sent to sliverimplant builder. New Payload UUID: {resp.NewPayloadUUID}".encode("utf-8"),
+            ))
+
+            return MythicCommandBase.PTTaskCreateTaskingMessageResponse(
+                TaskID=taskData.Task.ID, Success=True, Completed=True
+            )
+
+        except Exception as e:
+            # RPC-level failure (rabbitmq/network)
+            await SendMythicRPCResponseCreate(MythicRPCResponseCreateMessage(
+                TaskID=taskData.Task.ID,
+                Response=f"Error sending payload create RPC: {e}".encode("utf-8"),
+            ))
+            return MythicCommandBase.PTTaskCreateTaskingMessageResponse(
+                TaskID=taskData.Task.ID, Success=False, Completed=True
+            )
+        
+        # resp should be MythicRPCPayloadCreateFromScratchMessageResponse-like
+        if getattr(resp, "Success", False):
+            build_msg = getattr(resp, "BuildMessage", "Payload generation finished, but no build message was returned.")
+            await SendMythicRPCResponseCreate(MythicRPCResponseCreateMessage(
+                TaskID=taskData.Task.ID,
+                Response=build_msg.encode("utf-8"),
+            ))
+            return MythicCommandBase.PTTaskCreateTaskingMessageResponse(
+                TaskID=taskData.Task.ID, Success=True, Completed=True
+            )
+        else:
+            err_text = getattr(resp, "Error", "Unknown error from payload builder")
+            await SendMythicRPCResponseCreate(MythicRPCResponseCreateMessage(
+                TaskID=taskData.Task.ID,
+                Response=f"Payload generation failed: {err_text}".encode("utf-8"),
+            ))
+            return MythicCommandBase.PTTaskCreateTaskingMessageResponse(
+                TaskID=taskData.Task.ID, Success=False, Completed=True
+            )
 
     async def process_response(self, task: PTTaskMessageAllData, response: any) -> PTTaskProcessResponseMessageResponse:
         resp = PTTaskProcessResponseMessageResponse(TaskID=task.Task.ID, Success=True)

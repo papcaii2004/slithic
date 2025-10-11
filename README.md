@@ -80,13 +80,9 @@ Once the initial setup is complete, the workflow for editing code and testing ch
 
     -   If you edit commands in `sliverapi` (e.g., `generate.py`):
         ```bash
-        # From your Mythic directory
-        sudo ./mythic-cli restart sliverapi
-        ```
-    -   If you edit build logic in `sliverimplant` (e.g., `builder.py`):
-        ```bash
-        # From your Mythic directory
-        sudo ./mythic-cli restart sliverimplant
+        # Still within the Mythic directory
+        sudo ./mythic-cli install folder /root/slithic-agent
+        sudo ./mythic-cli restart
         ```
 
 This process takes only a few seconds, and your changes will be applied immediately.
